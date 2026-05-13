@@ -342,6 +342,8 @@ function SelectSession:post_start()
     return state.session == self
   end)
 
+  keyset({ "n" }, "<Esc>", function() self:cancel() end, base)
+  keyset("n", "q", function() self:cancel() end, base)
   keyset("i", "<C-p>", function() self:move(-1) end, base)
   keyset("i", "<C-n>", function() self:move(1) end, base)
   keyset("i", "<C-k>", function() self:move(-1) end, base)
