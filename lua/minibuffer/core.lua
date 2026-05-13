@@ -109,6 +109,9 @@ local state = {
 ---@field scroll_offset integer
 ---@field display_height integer|nil
 ---@field loading boolean
+---@field file_preview boolean
+---@field _preview_win integer|nil
+---@field _preview_original_buf integer|nil
 ---@field _req_id integer
 local SelectSession = {}
 SelectSession.__index = SelectSession
@@ -162,6 +165,9 @@ function SelectSession.new(opts)
     display_height = nil,
     loading = false,
     _req_id = 0,
+    file_preview = opts.file_preview ~= false,
+    _preview_win = nil,
+    _preview_original_buf = nil,
   }, SelectSession)
   return self
 end
@@ -266,12 +272,12 @@ function SelectSession:render()
   local extra_loading = self.loading and 1 or 0
   local visible_height = math.min(self.max_height, total + extra_loading)
   if
-    not self.allow_shrink
-    and self.display.win
-    and vim.api.nvim_win_is_valid(self.display.win)
+      not self.allow_shrink
+      and self.display.win
+      and vim.api.nvim_win_is_valid(self.display.win)
   then
     visible_height =
-      math.max(vim.api.nvim_win_get_height(self.display.win), visible_height)
+        math.max(vim.api.nvim_win_get_height(self.display.win), visible_height)
   end
   self.display_height = math.min(self.max_height, total) -- only items affect scrolling
   self:ensure_visible()
@@ -285,7 +291,7 @@ function SelectSession:render()
   end
   if self.loading then
     lines_data[#lines_data + 1] =
-      { { text = " … loading …", hl = "MinibufferLoading" } }
+    { { text = " … loading …", hl = "MinibufferLoading" } }
   end
 
   util.write_highlighted_lines(self.display.buf, state.ns, lines_data)
@@ -319,6 +325,9 @@ function SelectSession:render()
   if self.on_change then
     pcall(self.on_change, self.input, self.filtered_items[self.current_index])
   end
+  if self.file_preview then
+    self:_update_file_preview(self.filtered_items[self.current_index])
+  end
   vim.cmd.redraw()
 end
 
@@ -333,27 +342,10 @@ function SelectSession:post_start()
     return state.session == self
   end)
 
-  keyset("i", "<Esc>", function()
-    self:cancel()
-  end, base)
-  keyset("i", "<CR>", function()
-    self:accept()
-  end, base)
-  keyset("i", "<C-y>", function()
-    self:accept()
-  end, base)
-  keyset("i", "<Up>", function()
-    self:move(-1)
-  end, base)
-  keyset("i", "<Down>", function()
-    self:move(1)
-  end, base)
-  keyset("i", "<C-p>", function()
-    self:move(-1)
-  end, base)
-  keyset("i", "<C-n>", function()
-    self:move(1)
-  end, base)
+  keyset("i", "<C-p>", function() self:move(-1) end, base)
+  keyset("i", "<C-n>", function() self:move(1) end, base)
+  keyset("i", "<C-k>", function() self:move(-1) end, base)
+  keyset("i", "<C-j>", function() self:move(1) end, base)
   keyset("i", "<C-w>", "<C-S-w>", base)
 
   if self.multi then
@@ -366,6 +358,13 @@ function SelectSession:post_start()
     pcall(self.on_start, buf, self, keyset)
   end
   state.active_window = util.focus_cmd_win()
+
+  if self.file_preview then
+    self._preview_win = state.active_window
+    if self._preview_win and vim.api.nvim_win_is_valid(self._preview_win) then
+      self._preview_original_buf = vim.api.nvim_win_get_buf(self._preview_win)
+    end
+  end
 
   vim.api.nvim_buf_attach(buf, false, {
     on_lines = function(_, _, _, _, _, _, _)
@@ -482,7 +481,7 @@ function SelectSession:move(delta)
     return
   end
   self.current_index =
-    math.max(1, math.min(#self.filtered_items, self.current_index + delta))
+      math.max(1, math.min(#self.filtered_items, self.current_index + delta))
   self:render()
 end
 
@@ -518,7 +517,42 @@ function SelectSession:toggle_selection()
   self:render()
 end
 
+---@param item any
+function SelectSession:_update_file_preview(item)
+  if not self.file_preview or not self._preview_win then
+    return
+  end
+  if not vim.api.nvim_win_is_valid(self._preview_win) then
+    return
+  end
+  local filepath, lnum
+  if type(item) == "string" and vim.fn.filereadable(item) == 1 then
+    filepath = item
+  elseif type(item) == "table" then
+    filepath = item.file or item.path
+    lnum = item.line
+  end
+  if filepath and vim.fn.filereadable(filepath) == 1 then
+    pcall(vim.api.nvim_win_call, self._preview_win, function()
+      vim.cmd("edit " .. vim.fn.fnameescape(filepath))
+      if lnum then
+        vim.api.nvim_win_set_cursor(0, { lnum, 0 })
+        vim.cmd("normal! zz")
+      end
+    end)
+  end
+end
+
 function SelectSession:cancel()
+  if self.file_preview
+      and self._preview_win
+      and self._preview_original_buf
+      and vim.api.nvim_win_is_valid(self._preview_win)
+      and vim.api.nvim_buf_is_valid(self._preview_original_buf)
+  then
+    vim.api.nvim_win_set_buf(self._preview_win, self._preview_original_buf)
+  end
+
   local cb = self.on_cancel
   self:close()
 
@@ -767,7 +801,7 @@ function InputSession:render()
   end
   if self.loading then
     lines_data[#lines_data + 1] =
-      { { text = " … loading …", hl = "MinibufferLoading" } }
+    { { text = " … loading …", hl = "MinibufferLoading" } }
   end
 
   util.write_highlighted_lines(self.display.buf, state.ns, lines_data)
@@ -807,27 +841,15 @@ function InputSession:post_start()
     return state.session == self
   end)
 
-  keyset("i", "<Esc>", function()
-    self:cancel()
-  end, base)
-  keyset("i", "<CR>", function()
-    self:submit()
-  end, base)
-  keyset("i", "<Up>", function()
-    self:move(-1)
-  end, base)
-  keyset("i", "<Down>", function()
-    self:move(1)
-  end, base)
-  keyset("i", "<C-p>", function()
-    self:move(-1)
-  end, base)
-  keyset("i", "<C-n>", function()
-    self:move(1)
-  end, base)
-  keyset("i", "<C-y>", function()
-    self:accept_suggestion()
-  end, base)
+  keyset("i", "<Esc>", function() self:cancel() end, base)
+  keyset("i", "<CR>", function() self:accept() end, base)
+  keyset("i", "<C-y>", function() self:accept() end, base)
+  keyset("i", "<Up>", function() self:move(-1) end, base)
+  keyset("i", "<Down>", function() self:move(1) end, base)
+  keyset("i", "<C-p>", function() self:move(-1) end, base)
+  keyset("i", "<C-n>", function() self:move(1) end, base)
+  keyset("i", "<C-k>", function() self:move(-1) end, base)
+  keyset("i", "<C-j>", function() self:move(1) end, base)
   keyset("i", "<C-w>", "<C-S-w>", base)
 
   if self.on_start then
@@ -954,7 +976,7 @@ function InputSession:move(delta)
     return
   end
   self.current_index =
-    math.max(1, math.min(#self.suggestions, self.current_index + delta))
+      math.max(1, math.min(#self.suggestions, self.current_index + delta))
   self:render()
 end
 
