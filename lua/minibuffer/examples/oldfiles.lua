@@ -23,7 +23,7 @@ end
 
 local function format_fn(item)
   return {
-    { text = "  " .. item.name, hl = "Normal" },
+    { text = "  " .. item.name,  hl = "Normal" },
     { text = " - " .. item.path, hl = "Comment" },
   }
 end
@@ -34,7 +34,9 @@ local function filter_fn(items, input)
   end
   local results = {}
   for _, item in ipairs(items) do
-    if item:lower():find(input) then
+    if item.name:lower():find(input, 1, true)
+        or item.path:lower():find(input, 1, true)
+    then
       results[#results + 1] = item
     end
   end
@@ -56,7 +58,7 @@ return function(o)
     format_fn = format_fn,
     filter_fn = filter_fn,
     on_select = function(selection)
-      vim.cmd("edit " .. vim.fn.fnameescape(selection.path))
+      vim.cmd("edit " .. vim.fn.fnameescape(selection[1].path))
     end,
     on_start = function(buf, sess, keyset)
       -- Horizontal split open
