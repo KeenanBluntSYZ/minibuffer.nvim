@@ -112,6 +112,7 @@ local state = {
 ---@field file_preview boolean
 ---@field _preview_win integer|nil
 ---@field _preview_original_buf integer|nil
+---@field _preview_scratch_buf nil,
 ---@field _req_id integer
 local SelectSession = {}
 SelectSession.__index = SelectSession
@@ -168,6 +169,7 @@ function SelectSession.new(opts)
     file_preview = opts.file_preview ~= false,
     _preview_win = nil,
     _preview_original_buf = nil,
+    _preview_scratch_buf = nil,
   }, SelectSession)
   return self
 end
@@ -365,6 +367,10 @@ function SelectSession:post_start()
     self._preview_win = state.active_window
     if self._preview_win and vim.api.nvim_win_is_valid(self._preview_win) then
       self._preview_original_buf = vim.api.nvim_win_get_buf(self._preview_win)
+      local scratch = vim.api.nvim_create_buf(false, true)
+      vim.bo[scratch].bufhidden = "wipe"
+      self._preview_scratch_buf = scratch
+      vim.api.nvim_win_set_buf(self._preview_win, scratch)
     end
   end
 
@@ -521,10 +527,13 @@ end
 
 ---@param item any
 function SelectSession:_update_file_preview(item)
-  if not self.file_preview or not self._preview_win then
+  if not self.file_preview
+      or not self._preview_win
+      or not self._preview_scratch_buf then
     return
   end
-  if not vim.api.nvim_win_is_valid(self._preview_win) then
+  if not vim.api.nvim_win_is_valid(self._preview_win)
+      or not vim.api.nvim_buf_is_valid(self._preview_scratch_buf) then
     return
   end
   local filepath, lnum
@@ -534,30 +543,30 @@ function SelectSession:_update_file_preview(item)
     filepath = item.file or item.path
     lnum = item.line
   end
-  if filepath and vim.fn.filereadable(filepath) == 1 then
-    pcall(vim.api.nvim_win_call, self._preview_win, function()
-      vim.cmd("edit " .. vim.fn.fnameescape(filepath))
-      if lnum then
-        vim.api.nvim_win_set_cursor(0, { lnum, 0 })
-        vim.cmd("normal! zz")
-      end
+  if not filepath or vim.fn.filereadable(filepath) ~= 1 then
+    return
+  end
+
+  local lines = vim.fn.readfile(filepath, "", 500)
+  vim.api.nvim_buf_set_lines(self._preview_scratch_buf, 0, -1, false, lines)
+
+  local ft = vim.filetype.match({ filename = filepath, buf = self._preview_scratch_buf })
+  if ft then
+    vim.bo[self._preview_scratch_buf].filetype = ft
+  end
+
+  if lnum and lnum > 0 then
+    local capped = math.min(lnum, #lines)
+    pcall(vim.api.nvim_win_set_cursor, self._preview_win, { capped, 0 })
+    vim.api.nvim_win_call(self._preview_win, function()
+      vim.cmd("normal! zz")
     end)
   end
 end
 
 function SelectSession:cancel()
-  if self.file_preview
-      and self._preview_win
-      and self._preview_original_buf
-      and vim.api.nvim_win_is_valid(self._preview_win)
-      and vim.api.nvim_buf_is_valid(self._preview_original_buf)
-  then
-    vim.api.nvim_win_set_buf(self._preview_win, self._preview_original_buf)
-  end
-
   local cb = self.on_cancel
   self:close()
-
   if cb then
     vim.schedule(function()
       pcall(cb)
@@ -570,6 +579,19 @@ function SelectSession:close()
     return
   end
   self.closed = true
+
+  if self.file_preview
+      and self._preview_win
+      and self._preview_original_buf
+      and vim.api.nvim_win_is_valid(self._preview_win)
+      and vim.api.nvim_buf_is_valid(self._preview_original_buf)
+  then
+    vim.api.nvim_win_set_buf(self._preview_win, self._preview_original_buf)
+  end
+  if self._preview_scratch_buf and vim.api.nvim_buf_is_valid(self._preview_scratch_buf) then
+    pcall(vim.api.nvim_buf_delete, self._preview_scratch_buf, { force = true })
+    self._preview_scratch_buf = nil
+  end
 
   vim.cmd("stopinsert")
 
